@@ -389,33 +389,47 @@ def weather_description(code):
 
 
 # ============================================================
-# OPEN-METEO WEATHER
+# GOOGLE WEATHER API
 # ============================================================
 
-# Small in-memory cache so repeated requests from the same browser
-# do not repeatedly hit Open-Meteo. This is especially important on
-# Render free instances where several frontend requests can arrive
-# together.
+# Google current conditions are refreshed approximately every
+# 15 minutes. A 10-minute backend cache also prevents repeated
+# requests from the same browser from unnecessarily hitting the API.
 WEATHER_CACHE = {}
 WEATHER_CACHE_SECONDS = 600
 
 
-def build_weather_fallback(latitude, longitude, reason="Weather service unavailable"):
-    """Always return a complete numeric weather object."""
+def build_weather_unavailable(
+    latitude,
+    longitude,
+    reason="Weather service unavailable"
+):
+    """
+    Return an unavailable weather response.
+
+    IMPORTANT:
+    Do not invent a temperature such as 32°C when the live
+    weather provider is unavailable.
+    """
+
     return {
-        "temperature": 32.0,
-        "apparent_temperature": 32.0,
-        "humidity": 55.0,
-        "precipitation": 0.0,
-        "rain": 0.0,
-        "showers": 0.0,
-        "weather_code": 0,
+        "temperature": None,
+        "apparent_temperature": None,
+        "humidity": None,
+        "precipitation": None,
+        "rain": None,
+        "showers": None,
+        "weather_code": None,
         "weather_description": "Weather data temporarily unavailable",
-        "cloud_cover": 0.0,
-        "wind_speed": 0.0,
+        "cloud_cover": None,
+        "wind_speed": None,
+        "wind_direction": None,
+        "wind_gust": None,
+        "uv_index": None,
+        "visibility": None,
         "time": None,
-        "timezone": "auto",
-        "source": "Fallback",
+        "timezone": None,
+        "source": "Google Weather API",
         "live": False,
         "fallback": True,
         "fallback_reason": str(reason),
@@ -431,223 +445,398 @@ def get_current_weather(
     latitude = safe_float(latitude, 0)
     longitude = safe_float(longitude, 0)
 
-    cache_key = (round(latitude, 4), round(longitude, 4))
+    if latitude == 0 and longitude == 0:
+        return build_weather_unavailable(
+            latitude,
+            longitude,
+            "Invalid coordinates"
+        )
+
+    cache_key = (
+        round(latitude, 4),
+        round(longitude, 4)
+    )
+
     cached = WEATHER_CACHE.get(cache_key)
 
     if cached:
         cached_at, cached_weather = cached
+
         if time.time() - cached_at < WEATHER_CACHE_SECONDS:
-            print(f"Weather cache hit for {cache_key}")
+            print(
+                f"Google Weather cache hit: {cache_key}"
+            )
             return dict(cached_weather)
 
+    if not GOOGLE_MAPS_API_KEY:
+        return build_weather_unavailable(
+            latitude,
+            longitude,
+            "GOOGLE_MAPS_API_KEY is missing"
+        )
+
     url = (
-        "https://api.open-meteo.com/v1/forecast"
+        "https://weather.googleapis.com/v1/"
+        "currentConditions:lookup"
     )
 
-
     params = {
-
-        "latitude":
-            latitude,
-
-        "longitude":
-            longitude,
-
-        "current":
-            ",".join([
-
-                "temperature_2m",
-
-                "relative_humidity_2m",
-
-                "apparent_temperature",
-
-                "precipitation",
-
-                "rain",
-
-                "showers",
-
-                "weather_code",
-
-                "cloud_cover",
-
-                "wind_speed_10m"
-            ]),
-
-        "timezone":
-            "auto"
+        "key": GOOGLE_MAPS_API_KEY,
+        "location.latitude": latitude,
+        "location.longitude": longitude
     }
 
-
     try:
+        print(
+            "Requesting Google live weather:",
+            latitude,
+            longitude
+        )
+
         response = requests.get(
             url,
             params=params,
             timeout=15
         )
 
-        if response.status_code == 429:
+        if response.status_code != 200:
             print(
-                f"Open-Meteo returned HTTP 429 for {cache_key}. Using fallback weather."
+                "Google Weather API error:",
+                response.status_code,
+                response.text[:500]
             )
-            return build_weather_fallback(
+
+            return build_weather_unavailable(
                 latitude,
                 longitude,
-                "Open-Meteo rate limit (HTTP 429)"
+                (
+                    "Google Weather API HTTP "
+                    + str(response.status_code)
+                )
             )
 
-        response.raise_for_status()
         data = response.json()
 
-    except Exception as weather_error:
-        print(
-            "Open-Meteo request failed. Using fallback weather:",
-            weather_error
+        # --------------------------------------------------------
+        # Weather condition
+        # --------------------------------------------------------
+
+        weather_condition = data.get(
+            "weatherCondition",
+            {}
         )
-        return build_weather_fallback(
+
+        description_object = weather_condition.get(
+            "description",
+            {}
+        )
+
+        weather_description = (
+            description_object.get(
+                "text",
+                "Current weather"
+            )
+        )
+
+        weather_type = weather_condition.get(
+            "type"
+        )
+
+        # --------------------------------------------------------
+        # Temperature
+        # --------------------------------------------------------
+
+        temperature_object = data.get(
+            "temperature",
+            {}
+        )
+
+        apparent_temperature_object = data.get(
+            "feelsLikeTemperature",
+            {}
+        )
+
+        temperature = safe_float(
+            temperature_object.get("degrees"),
+            None
+        )
+
+        apparent_temperature = safe_float(
+            apparent_temperature_object.get("degrees"),
+            None
+        )
+
+        # --------------------------------------------------------
+        # Humidity
+        # --------------------------------------------------------
+
+        humidity = safe_float(
+            data.get("relativeHumidity"),
+            None
+        )
+
+        # --------------------------------------------------------
+        # Precipitation
+        # --------------------------------------------------------
+
+        precipitation_object = data.get(
+            "precipitation",
+            {}
+        )
+
+        precipitation_probability = (
+            precipitation_object
+            .get("probability", {})
+            .get("percent")
+        )
+
+        qpf_object = precipitation_object.get(
+            "qpf",
+            {}
+        )
+
+        precipitation = safe_float(
+            qpf_object.get("quantity"),
+            0
+        )
+
+        precipitation_type = (
+            precipitation_object
+            .get("probability", {})
+            .get("type")
+        )
+
+        # --------------------------------------------------------
+        # Wind
+        # --------------------------------------------------------
+
+        wind_object = data.get(
+            "wind",
+            {}
+        )
+
+        wind_speed_object = wind_object.get(
+            "speed",
+            {}
+        )
+
+        wind_gust_object = wind_object.get(
+            "gust",
+            {}
+        )
+
+        wind_direction_object = wind_object.get(
+            "direction",
+            {}
+        )
+
+        wind_speed = safe_float(
+            wind_speed_object.get("value"),
+            None
+        )
+
+        wind_gust = safe_float(
+            wind_gust_object.get("value"),
+            None
+        )
+
+        wind_direction = safe_float(
+            wind_direction_object.get("degrees"),
+            None
+        )
+
+        wind_direction_cardinal = (
+            wind_direction_object.get("cardinal")
+        )
+
+        # --------------------------------------------------------
+        # Cloud cover / UV / visibility
+        # --------------------------------------------------------
+
+        cloud_cover = safe_float(
+            data.get("cloudCover"),
+            None
+        )
+
+        uv_index = safe_float(
+            data.get("uvIndex"),
+            None
+        )
+
+        visibility_object = data.get(
+            "visibility",
+            {}
+        )
+
+        visibility = safe_float(
+            visibility_object.get("distance"),
+            None
+        )
+
+        # --------------------------------------------------------
+        # Timezone / current time
+        # --------------------------------------------------------
+
+        timezone_object = data.get(
+            "timeZone",
+            {}
+        )
+
+        timezone = timezone_object.get("id")
+
+        current_time = data.get("currentTime")
+
+        # --------------------------------------------------------
+        # Build live weather result
+        # --------------------------------------------------------
+
+        weather_result = {
+            "temperature": (
+                round(temperature, 1)
+                if temperature is not None
+                else None
+            ),
+
+            "apparent_temperature": (
+                round(apparent_temperature, 1)
+                if apparent_temperature is not None
+                else None
+            ),
+
+            "humidity": (
+                round(humidity, 1)
+                if humidity is not None
+                else None
+            ),
+
+            "precipitation": round(
+                precipitation,
+                2
+            ),
+
+            "rain": round(
+                precipitation,
+                2
+            ),
+
+            "showers": 0.0,
+
+            "precipitation_probability":
+                precipitation_probability,
+
+            "precipitation_type":
+                precipitation_type,
+
+            "weather_code":
+                weather_type,
+
+            "weather_description":
+                weather_description,
+
+            "cloud_cover": (
+                round(cloud_cover, 1)
+                if cloud_cover is not None
+                else None
+            ),
+
+            "wind_speed": (
+                round(wind_speed, 1)
+                if wind_speed is not None
+                else None
+            ),
+
+            "wind_gust": (
+                round(wind_gust, 1)
+                if wind_gust is not None
+                else None
+            ),
+
+            "wind_direction": (
+                round(wind_direction, 1)
+                if wind_direction is not None
+                else None
+            ),
+
+            "wind_direction_cardinal":
+                wind_direction_cardinal,
+
+            "uv_index":
+                uv_index,
+
+            "visibility":
+                visibility,
+
+            "time":
+                current_time,
+
+            "timezone":
+                timezone,
+
+            "source":
+                "Google Weather API",
+
+            "live":
+                True,
+
+            "fallback":
+                False,
+
+            "latitude":
+                latitude,
+
+            "longitude":
+                longitude
+        }
+
+        WEATHER_CACHE[cache_key] = (
+            time.time(),
+            dict(weather_result)
+        )
+
+        print(
+            "Google live weather loaded:",
+            weather_description,
+            temperature,
+            "°C"
+        )
+
+        return weather_result
+
+    except requests.exceptions.Timeout as error:
+        print(
+            "Google Weather API timeout:",
+            error
+        )
+
+        return build_weather_unavailable(
             latitude,
             longitude,
-            weather_error
+            "Google Weather API timeout"
         )
 
-
-    current = data.get(
-        "current",
-        {}
-    )
-
-
-    if not current:
-
-        raise Exception(
-            "Weather API returned no current data."
+    except requests.exceptions.RequestException as error:
+        print(
+            "Google Weather request failed:",
+            error
         )
 
+        return build_weather_unavailable(
+            latitude,
+            longitude,
+            error
+        )
 
-    weather_code = current.get(
-        "weather_code",
-        0
-    )
+    except Exception as error:
+        print(
+            "Google Weather processing error:",
+            error
+        )
 
-
-    weather_result = {
-
-        "temperature":
-            round(
-                safe_float(
-                    current.get(
-                        "temperature_2m"
-                    ),
-                    32
-                ),
-                1
-            ),
-
-        "apparent_temperature":
-            round(
-                safe_float(
-                    current.get(
-                        "apparent_temperature"
-                    ),
-                    32
-                ),
-                1
-            ),
-
-        "humidity":
-            round(
-                safe_float(
-                    current.get(
-                        "relative_humidity_2m"
-                    ),
-                    50
-                ),
-                1
-            ),
-
-        "precipitation":
-            round(
-                safe_float(
-                    current.get(
-                        "precipitation"
-                    ),
-                    0
-                ),
-                2
-            ),
-
-        "rain":
-            round(
-                safe_float(
-                    current.get(
-                        "rain"
-                    ),
-                    0
-                ),
-                2
-            ),
-
-        "showers":
-            round(
-                safe_float(
-                    current.get(
-                        "showers"
-                    ),
-                    0
-                ),
-                2
-            ),
-
-        "weather_code":
-            weather_code,
-
-        "weather_description":
-            weather_description(
-                weather_code
-            ),
-
-        "cloud_cover":
-            round(
-                safe_float(
-                    current.get(
-                        "cloud_cover"
-                    ),
-                    0
-                ),
-                1
-            ),
-
-        "wind_speed":
-            round(
-                safe_float(
-                    current.get(
-                        "wind_speed_10m"
-                    ),
-                    0
-                ),
-                1
-            ),
-
-        "time":
-            current.get(
-                "time"
-            ),
-
-        "timezone":
-            data.get(
-                "timezone"
-            ),
-
-        "source":
-            "Open-Meteo",
-
-        "live":
-            True
-    }
-
-    WEATHER_CACHE[cache_key] = (time.time(), dict(weather_result))
-    return weather_result
+        return build_weather_unavailable(
+            latitude,
+            longitude,
+            error
+        )
 
 
 # ============================================================
@@ -2524,63 +2713,74 @@ def route_api():
         try:
 
             source_weather = get_current_weather(
-
                 source_lat,
-
                 source_lon
             )
 
-
             destination_weather = get_current_weather(
-
                 destination_lat,
-
                 destination_lon
             )
 
-
-            route_temperature = round(
-
-                (
-                    safe_float(
-                        source_weather.get("temperature"),
-                        32
-                    )
-
-                    +
-
-                    safe_float(
-                        destination_weather.get("temperature"),
-                        32
-                    )
-                ) / 2,
-
-                1
+            source_temperature = safe_float(
+                source_weather.get("temperature"),
+                None
             )
 
-
-            route_precipitation = round(
-
-                (
-                    safe_float(
-                        source_weather.get("precipitation"),
-                        0
-                    )
-
-                    +
-
-                    safe_float(
-                        destination_weather.get("precipitation"),
-                        0
-                    )
-                ) / 2,
-
-                2
+            destination_temperature = safe_float(
+                destination_weather.get("temperature"),
+                None
             )
 
+            source_precipitation = safe_float(
+                source_weather.get("precipitation"),
+                None
+            )
+
+            destination_precipitation = safe_float(
+                destination_weather.get("precipitation"),
+                None
+            )
+
+            available_temperatures = [
+                value
+                for value in [
+                    source_temperature,
+                    destination_temperature
+                ]
+                if value is not None
+            ]
+
+            available_precipitation = [
+                value
+                for value in [
+                    source_precipitation,
+                    destination_precipitation
+                ]
+                if value is not None
+            ]
+
+            route_temperature = (
+                round(
+                    sum(available_temperatures)
+                    / len(available_temperatures),
+                    1
+                )
+                if available_temperatures
+                else None
+            )
+
+            route_precipitation = (
+                round(
+                    sum(available_precipitation)
+                    / len(available_precipitation),
+                    2
+                )
+                if available_precipitation
+                else None
+            )
 
             route_weather = {
-
                 "temperature":
                     route_temperature,
 
@@ -2594,12 +2794,14 @@ def route_api():
                     destination_weather,
 
                 "data_source":
-                    "Open-Meteo",
+                    "Google Weather API",
 
                 "live":
-                    True
+                    bool(
+                        source_weather.get("live")
+                        and destination_weather.get("live")
+                    )
             }
-
 
         except Exception as weather_error:
 
@@ -2608,43 +2810,42 @@ def route_api():
                 weather_error
             )
 
-
             route_weather = {
-
-                "temperature":
-                    32.0,
-
-                "precipitation":
-                    0.0,
+                "temperature": None,
+                "precipitation": None,
 
                 "source":
-                    build_weather_fallback(
+                    build_weather_unavailable(
                         source_lat,
                         source_lon,
                         weather_error
                     ),
 
                 "destination":
-                    build_weather_fallback(
+                    build_weather_unavailable(
                         destination_lat,
                         destination_lon,
                         weather_error
                     ),
 
                 "data_source":
-                    "Fallback",
+                    "Google Weather API",
 
                 "live":
                     False,
 
                 "error":
-                    str(
-                        weather_error
-                    )
+                    str(weather_error)
             }
 
 
-        # Ensure weather values used by ML/routing are always numeric.
+        # ============================================================
+        # WEATHER VALUES USED BY THE ML MODEL
+        # ============================================================
+        #
+        # If live weather is unavailable, the UI keeps the value as
+        # unavailable. The ML model still receives safe numeric
+        # defaults internally so route prediction does not crash.
         route_weather["temperature"] = safe_float(
             route_weather.get("temperature"),
             32
@@ -3254,7 +3455,7 @@ def route_api():
                     else None,
 
                 "weather_provider":
-                    "Open-Meteo",
+                    "Google Weather API",
 
                 "google_api_error":
                     google_error
@@ -3410,7 +3611,7 @@ if __name__ == "__main__":
     )
 
     print(
-        "Weather provider: Open-Meteo"
+        "Weather provider: Google Weather API"
     )
 
     print("=" * 70)
