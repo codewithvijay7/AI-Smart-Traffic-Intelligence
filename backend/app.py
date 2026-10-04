@@ -3,6 +3,7 @@ from flask_cors import CORS
 import os
 import joblib
 import requests
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -390,24 +391,58 @@ def weather_description(code):
 # OPEN-METEO WEATHER
 # ============================================================
 
+WEATHER_CACHE = {}
+
+# Cache weather for 10 minutes to reduce Open-Meteo requests.
+WEATHER_CACHE_SECONDS = 600
+
+
+def get_weather_fallback(error_message=None):
+
+    return {
+
+        "temperature": None,
+
+        "apparent_temperature": None,
+
+        "humidity": None,
+
+        "precipitation": 0.0,
+
+        "rain": 0.0,
+
+        "showers": 0.0,
+
+        "weather_code": None,
+
+        "weather_description":
+            "Weather temporarily unavailable",
+
+        "cloud_cover": None,
+
+        "wind_speed": None,
+
+        "time": None,
+
+        "timezone": None,
+
+        "source":
+            "Open-Meteo unavailable",
+
+        "data_source":
+            "Open-Meteo unavailable",
+
+        "live": False,
+
+        "error":
+            error_message
+    }
+
+
 def get_current_weather(
     latitude,
     longitude
 ):
-    """
-    Get current weather from Open-Meteo with a short server-side cache
-    and retry handling for HTTP 429 rate limits.
-    """
-
-    import time
-
-    # Cache repeated requests for 5 minutes.
-    # This is especially useful because /api/route requests weather for
-    # both source and destination.
-    WEATHER_CACHE_SECONDS = 300
-
-    if "WEATHER_CACHE" not in globals():
-        WEATHER_CACHE = {}
 
     cache_key = (
         round(float(latitude), 3),
@@ -417,80 +452,118 @@ def get_current_weather(
     cached = WEATHER_CACHE.get(cache_key)
 
     if cached:
-        cached_at = cached.get("cached_at", 0)
 
-        if time.time() - cached_at < WEATHER_CACHE_SECONDS:
+        cache_age = time.time() - cached["timestamp"]
+
+        if cache_age < WEATHER_CACHE_SECONDS:
+
             print(
-                f"Weather cache used for {cache_key}"
+                f"Weather cache used for ({latitude}, {longitude})"
             )
+
             return cached["data"]
 
-    url = "https://api.open-meteo.com/v1/forecast"
+
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+    )
+
 
     params = {
-        "latitude": latitude,
-        "longitude": longitude,
-        "current": ",".join([
-            "temperature_2m",
-            "relative_humidity_2m",
-            "apparent_temperature",
-            "precipitation",
-            "rain",
-            "showers",
-            "weather_code",
-            "cloud_cover",
-            "wind_speed_10m"
-        ]),
-        "timezone": "auto"
+
+        "latitude":
+            latitude,
+
+        "longitude":
+            longitude,
+
+        "current":
+            ",".join([
+
+                "temperature_2m",
+
+                "relative_humidity_2m",
+
+                "apparent_temperature",
+
+                "precipitation",
+
+                "rain",
+
+                "showers",
+
+                "weather_code",
+
+                "cloud_cover",
+
+                "wind_speed_10m"
+            ]),
+
+        "timezone":
+            "auto"
     }
 
-    last_error = None
 
-    for attempt in range(3):
-        try:
+    try:
+
+        print(
+            f"Weather API request for ({latitude}, {longitude})"
+        )
+
+
+        response = requests.get(
+
+            url,
+
+            params=params,
+
+            timeout=10
+        )
+
+
+        # Do not retry 429 responses. A retry loop can make
+        # Open-Meteo rate limiting worse.
+        if response.status_code == 429:
+
             print(
-                f"Weather API request "
-                f"(attempt {attempt + 1}/3) for {cache_key}"
+                "Open-Meteo returned HTTP 429 "
+                "(Too Many Requests). Using fallback weather."
             )
 
-            response = requests.get(
-                url,
-                params=params,
-                timeout=15
+            return get_weather_fallback(
+                "Weather service temporarily rate limited."
             )
 
-            # Open-Meteo rate limiting.
-            if response.status_code == 429:
-                last_error = (
-                    "Open-Meteo returned HTTP 429 "
-                    "(Too Many Requests)."
-                )
 
-                print(last_error)
+        response.raise_for_status()
 
-                if attempt < 2:
-                    time.sleep(2 * (attempt + 1))
 
-                continue
+        data = response.json()
 
-            response.raise_for_status()
 
-            data = response.json()
+        current = data.get(
+            "current",
+            {}
+        )
 
-            current = data.get("current", {})
 
-            if not current:
-                raise Exception(
-                    "Weather API returned no current data."
-                )
+        if not current:
 
-            weather_code = current.get(
-                "weather_code",
-                0
+            raise Exception(
+                "Weather API returned no current data."
             )
 
-            weather_data = {
-                "temperature": round(
+
+        weather_code = current.get(
+            "weather_code",
+            0
+        )
+
+
+        weather_data = {
+
+            "temperature":
+                round(
                     float(
                         current.get(
                             "temperature_2m",
@@ -500,7 +573,8 @@ def get_current_weather(
                     1
                 ),
 
-                "apparent_temperature": round(
+            "apparent_temperature":
+                round(
                     float(
                         current.get(
                             "apparent_temperature",
@@ -510,7 +584,8 @@ def get_current_weather(
                     1
                 ),
 
-                "humidity": round(
+            "humidity":
+                round(
                     float(
                         current.get(
                             "relative_humidity_2m",
@@ -520,7 +595,8 @@ def get_current_weather(
                     1
                 ),
 
-                "precipitation": round(
+            "precipitation":
+                round(
                     float(
                         current.get(
                             "precipitation",
@@ -530,7 +606,8 @@ def get_current_weather(
                     2
                 ),
 
-                "rain": round(
+            "rain":
+                round(
                     float(
                         current.get(
                             "rain",
@@ -540,7 +617,8 @@ def get_current_weather(
                     2
                 ),
 
-                "showers": round(
+            "showers":
+                round(
                     float(
                         current.get(
                             "showers",
@@ -550,13 +628,16 @@ def get_current_weather(
                     2
                 ),
 
-                "weather_code": weather_code,
+            "weather_code":
+                weather_code,
 
-                "weather_description": weather_description(
+            "weather_description":
+                weather_description(
                     weather_code
                 ),
 
-                "cloud_cover": round(
+            "cloud_cover":
+                round(
                     float(
                         current.get(
                             "cloud_cover",
@@ -566,7 +647,8 @@ def get_current_weather(
                     1
                 ),
 
-                "wind_speed": round(
+            "wind_speed":
+                round(
                     float(
                         current.get(
                             "wind_speed_10m",
@@ -576,54 +658,59 @@ def get_current_weather(
                     1
                 ),
 
-                "time": current.get("time"),
+            "time":
+                current.get(
+                    "time"
+                ),
 
-                "timezone": data.get("timezone"),
+            "timezone":
+                data.get(
+                    "timezone"
+                ),
 
-                "source": "Open-Meteo",
+            "source":
+                "Open-Meteo",
 
-                "live": True
-            }
+            "data_source":
+                "Open-Meteo",
 
-            WEATHER_CACHE[cache_key] = {
-                "cached_at": time.time(),
-                "data": weather_data
-            }
-
-            print(
-                f"Weather data loaded successfully for {cache_key}"
-            )
-
-            return weather_data
-
-        except requests.exceptions.RequestException as e:
-            last_error = e
-
-            print(
-                f"Weather request failed "
-                f"(attempt {attempt + 1}/3): {e}"
-            )
-
-            if attempt < 2:
-                time.sleep(2 * (attempt + 1))
-
-        except Exception as e:
-            last_error = e
-
-            print(
-                f"Weather processing failed "
-                f"(attempt {attempt + 1}/3): {e}"
-            )
-
-            if attempt < 2:
-                time.sleep(2 * (attempt + 1))
-
-    raise Exception(
-        f"Weather service unavailable: {last_error}"
-    )
+            "live":
+                True
+        }
 
 
-# ============================================================
+        WEATHER_CACHE[cache_key] = {
+
+            "timestamp":
+                time.time(),
+
+            "data":
+                weather_data
+        }
+
+
+        print(
+            f"Weather loaded successfully for "
+            f"({latitude}, {longitude})"
+        )
+
+
+        return weather_data
+
+
+    except Exception as weather_error:
+
+        print(
+            "Weather service unavailable:",
+            weather_error
+        )
+
+
+        return get_weather_fallback(
+            str(weather_error)
+        )
+
+
 # TRAFFIC LEVEL FROM GOOGLE
 # ============================================================
 
@@ -2465,115 +2552,129 @@ def route_api():
         # WEATHER
         # ====================================================
 
-        try:
+        source_weather = get_current_weather(
 
-            source_weather = get_current_weather(
+            source_lat,
 
-                source_lat,
+            source_lon
+        )
 
-                source_lon
+
+        destination_weather = get_current_weather(
+
+            destination_lat,
+
+            destination_lon
+        )
+
+
+        source_temperature = source_weather.get(
+            "temperature"
+        )
+
+
+        destination_temperature = destination_weather.get(
+            "temperature"
+        )
+
+
+        source_precipitation = source_weather.get(
+            "precipitation",
+            0.0
+        )
+
+
+        destination_precipitation = destination_weather.get(
+            "precipitation",
+            0.0
+        )
+
+
+        valid_temperatures = [
+
+            value
+
+            for value in [
+
+                source_temperature,
+
+                destination_temperature
+
+            ]
+
+            if isinstance(
+                value,
+                (int, float)
             )
+        ]
 
 
-            destination_weather = get_current_weather(
-
-                destination_lat,
-
-                destination_lon
-            )
-
+        if valid_temperatures:
 
             route_temperature = round(
 
-                (
-                    source_weather[
-                        "temperature"
-                    ]
-
-                    +
-
-                    destination_weather[
-                        "temperature"
-                    ]
-                ) / 2,
+                sum(valid_temperatures)
+                /
+                len(valid_temperatures),
 
                 1
             )
 
+        else:
 
-            route_precipitation = round(
+            route_temperature = None
 
-                (
-                    source_weather[
-                        "precipitation"
-                    ]
 
-                    +
+        route_precipitation = round(
 
-                    destination_weather[
-                        "precipitation"
-                    ]
-                ) / 2,
+            (
+                source_precipitation
+                +
+                destination_precipitation
+            ) / 2,
 
-                2
+            2
+        )
+
+
+        weather_is_live = (
+
+            source_weather.get(
+                "live",
+                False
             )
 
+            or
 
-            route_weather = {
-
-                "temperature":
-                    route_temperature,
-
-                "precipitation":
-                    route_precipitation,
-
-                "source":
-                    source_weather,
-
-                "destination":
-                    destination_weather,
-
-                "data_source":
-                    "Open-Meteo",
-
-                "live":
-                    True
-            }
-
-
-        except Exception as weather_error:
-
-            print(
-                "Weather API error:",
-                weather_error
+            destination_weather.get(
+                "live",
+                False
             )
+        )
 
 
-            route_weather = {
+        route_weather = {
 
-                "temperature":
-                    32.0,
+            "temperature":
+                route_temperature,
 
-                "precipitation":
-                    0.0,
+            "precipitation":
+                route_precipitation,
 
-                "source":
-                    None,
+            "source":
+                source_weather,
 
-                "destination":
-                    None,
+            "destination":
+                destination_weather,
 
-                "data_source":
-                    "Fallback",
+            "data_source":
+                "Open-Meteo"
+                if weather_is_live
+                else "Open-Meteo unavailable",
 
-                "live":
-                    False,
-
-                "error":
-                    str(
-                        weather_error
-                    )
-            }
+            "live":
+                weather_is_live
+        }
 
 
         # ====================================================
