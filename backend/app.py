@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import time
 import joblib
 import requests
 import pandas as pd
@@ -391,10 +392,53 @@ def weather_description(code):
 # OPEN-METEO WEATHER
 # ============================================================
 
+# Small in-memory cache so repeated requests from the same browser
+# do not repeatedly hit Open-Meteo. This is especially important on
+# Render free instances where several frontend requests can arrive
+# together.
+WEATHER_CACHE = {}
+WEATHER_CACHE_SECONDS = 600
+
+
+def build_weather_fallback(latitude, longitude, reason="Weather service unavailable"):
+    """Always return a complete numeric weather object."""
+    return {
+        "temperature": 32.0,
+        "apparent_temperature": 32.0,
+        "humidity": 55.0,
+        "precipitation": 0.0,
+        "rain": 0.0,
+        "showers": 0.0,
+        "weather_code": 0,
+        "weather_description": "Weather data temporarily unavailable",
+        "cloud_cover": 0.0,
+        "wind_speed": 0.0,
+        "time": None,
+        "timezone": "auto",
+        "source": "Fallback",
+        "live": False,
+        "fallback": True,
+        "fallback_reason": str(reason),
+        "latitude": safe_float(latitude, 0),
+        "longitude": safe_float(longitude, 0),
+    }
+
+
 def get_current_weather(
     latitude,
     longitude
 ):
+    latitude = safe_float(latitude, 0)
+    longitude = safe_float(longitude, 0)
+
+    cache_key = (round(latitude, 4), round(longitude, 4))
+    cached = WEATHER_CACHE.get(cache_key)
+
+    if cached:
+        cached_at, cached_weather = cached
+        if time.time() - cached_at < WEATHER_CACHE_SECONDS:
+            print(f"Weather cache hit for {cache_key}")
+            return dict(cached_weather)
 
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -436,20 +480,36 @@ def get_current_weather(
     }
 
 
-    response = requests.get(
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            timeout=15
+        )
 
-        url,
+        if response.status_code == 429:
+            print(
+                f"Open-Meteo returned HTTP 429 for {cache_key}. Using fallback weather."
+            )
+            return build_weather_fallback(
+                latitude,
+                longitude,
+                "Open-Meteo rate limit (HTTP 429)"
+            )
 
-        params=params,
+        response.raise_for_status()
+        data = response.json()
 
-        timeout=15
-    )
-
-
-    response.raise_for_status()
-
-
-    data = response.json()
+    except Exception as weather_error:
+        print(
+            "Open-Meteo request failed. Using fallback weather:",
+            weather_error
+        )
+        return build_weather_fallback(
+            latitude,
+            longitude,
+            weather_error
+        )
 
 
     current = data.get(
@@ -471,7 +531,7 @@ def get_current_weather(
     )
 
 
-    return {
+    weather_result = {
 
         "temperature":
             round(
@@ -585,6 +645,9 @@ def get_current_weather(
         "live":
             True
     }
+
+    WEATHER_CACHE[cache_key] = (time.time(), dict(weather_result))
+    return weather_result
 
 
 # ============================================================
@@ -2555,10 +2618,18 @@ def route_api():
                     0.0,
 
                 "source":
-                    None,
+                    build_weather_fallback(
+                        source_lat,
+                        source_lon,
+                        weather_error
+                    ),
 
                 "destination":
-                    None,
+                    build_weather_fallback(
+                        destination_lat,
+                        destination_lon,
+                        weather_error
+                    ),
 
                 "data_source":
                     "Fallback",
