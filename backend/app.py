@@ -394,196 +394,233 @@ def get_current_weather(
     latitude,
     longitude
 ):
+    """
+    Get current weather from Open-Meteo with a short server-side cache
+    and retry handling for HTTP 429 rate limits.
+    """
 
-    url = (
-        "https://api.open-meteo.com/v1/forecast"
+    import time
+
+    # Cache repeated requests for 5 minutes.
+    # This is especially useful because /api/route requests weather for
+    # both source and destination.
+    WEATHER_CACHE_SECONDS = 300
+
+    if "WEATHER_CACHE" not in globals():
+        WEATHER_CACHE = {}
+
+    cache_key = (
+        round(float(latitude), 3),
+        round(float(longitude), 3)
     )
 
+    cached = WEATHER_CACHE.get(cache_key)
+
+    if cached:
+        cached_at = cached.get("cached_at", 0)
+
+        if time.time() - cached_at < WEATHER_CACHE_SECONDS:
+            print(
+                f"Weather cache used for {cache_key}"
+            )
+            return cached["data"]
+
+    url = "https://api.open-meteo.com/v1/forecast"
 
     params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "current": ",".join([
+            "temperature_2m",
+            "relative_humidity_2m",
+            "apparent_temperature",
+            "precipitation",
+            "rain",
+            "showers",
+            "weather_code",
+            "cloud_cover",
+            "wind_speed_10m"
+        ]),
+        "timezone": "auto"
+    }
 
-        "latitude":
-            latitude,
+    last_error = None
 
-        "longitude":
-            longitude,
+    for attempt in range(3):
+        try:
+            print(
+                f"Weather API request "
+                f"(attempt {attempt + 1}/3) for {cache_key}"
+            )
 
-        "current":
-            ",".join([
+            response = requests.get(
+                url,
+                params=params,
+                timeout=15
+            )
 
-                "temperature_2m",
+            # Open-Meteo rate limiting.
+            if response.status_code == 429:
+                last_error = (
+                    "Open-Meteo returned HTTP 429 "
+                    "(Too Many Requests)."
+                )
 
-                "relative_humidity_2m",
+                print(last_error)
 
-                "apparent_temperature",
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
 
-                "precipitation",
+                continue
 
-                "rain",
+            response.raise_for_status()
 
-                "showers",
+            data = response.json()
 
+            current = data.get("current", {})
+
+            if not current:
+                raise Exception(
+                    "Weather API returned no current data."
+                )
+
+            weather_code = current.get(
                 "weather_code",
+                0
+            )
 
-                "cloud_cover",
+            weather_data = {
+                "temperature": round(
+                    float(
+                        current.get(
+                            "temperature_2m",
+                            0
+                        )
+                    ),
+                    1
+                ),
 
-                "wind_speed_10m"
-            ]),
+                "apparent_temperature": round(
+                    float(
+                        current.get(
+                            "apparent_temperature",
+                            0
+                        )
+                    ),
+                    1
+                ),
 
-        "timezone":
-            "auto"
-    }
+                "humidity": round(
+                    float(
+                        current.get(
+                            "relative_humidity_2m",
+                            0
+                        )
+                    ),
+                    1
+                ),
 
+                "precipitation": round(
+                    float(
+                        current.get(
+                            "precipitation",
+                            0
+                        )
+                    ),
+                    2
+                ),
 
-    response = requests.get(
+                "rain": round(
+                    float(
+                        current.get(
+                            "rain",
+                            0
+                        )
+                    ),
+                    2
+                ),
 
-        url,
+                "showers": round(
+                    float(
+                        current.get(
+                            "showers",
+                            0
+                        )
+                    ),
+                    2
+                ),
 
-        params=params,
+                "weather_code": weather_code,
 
-        timeout=15
+                "weather_description": weather_description(
+                    weather_code
+                ),
+
+                "cloud_cover": round(
+                    float(
+                        current.get(
+                            "cloud_cover",
+                            0
+                        )
+                    ),
+                    1
+                ),
+
+                "wind_speed": round(
+                    float(
+                        current.get(
+                            "wind_speed_10m",
+                            0
+                        )
+                    ),
+                    1
+                ),
+
+                "time": current.get("time"),
+
+                "timezone": data.get("timezone"),
+
+                "source": "Open-Meteo",
+
+                "live": True
+            }
+
+            WEATHER_CACHE[cache_key] = {
+                "cached_at": time.time(),
+                "data": weather_data
+            }
+
+            print(
+                f"Weather data loaded successfully for {cache_key}"
+            )
+
+            return weather_data
+
+        except requests.exceptions.RequestException as e:
+            last_error = e
+
+            print(
+                f"Weather request failed "
+                f"(attempt {attempt + 1}/3): {e}"
+            )
+
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+
+        except Exception as e:
+            last_error = e
+
+            print(
+                f"Weather processing failed "
+                f"(attempt {attempt + 1}/3): {e}"
+            )
+
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+
+    raise Exception(
+        f"Weather service unavailable: {last_error}"
     )
-
-
-    response.raise_for_status()
-
-
-    data = response.json()
-
-
-    current = data.get(
-        "current",
-        {}
-    )
-
-
-    if not current:
-
-        raise Exception(
-            "Weather API returned no current data."
-        )
-
-
-    weather_code = current.get(
-        "weather_code",
-        0
-    )
-
-
-    return {
-
-        "temperature":
-            round(
-                float(
-                    current.get(
-                        "temperature_2m",
-                        0
-                    )
-                ),
-                1
-            ),
-
-        "apparent_temperature":
-            round(
-                float(
-                    current.get(
-                        "apparent_temperature",
-                        0
-                    )
-                ),
-                1
-            ),
-
-        "humidity":
-            round(
-                float(
-                    current.get(
-                        "relative_humidity_2m",
-                        0
-                    )
-                ),
-                1
-            ),
-
-        "precipitation":
-            round(
-                float(
-                    current.get(
-                        "precipitation",
-                        0
-                    )
-                ),
-                2
-            ),
-
-        "rain":
-            round(
-                float(
-                    current.get(
-                        "rain",
-                        0
-                    )
-                ),
-                2
-            ),
-
-        "showers":
-            round(
-                float(
-                    current.get(
-                        "showers",
-                        0
-                    )
-                ),
-                2
-            ),
-
-        "weather_code":
-            weather_code,
-
-        "weather_description":
-            weather_description(
-                weather_code
-            ),
-
-        "cloud_cover":
-            round(
-                float(
-                    current.get(
-                        "cloud_cover",
-                        0
-                    )
-                ),
-                1
-            ),
-
-        "wind_speed":
-            round(
-                float(
-                    current.get(
-                        "wind_speed_10m",
-                        0
-                    )
-                ),
-                1
-            ),
-
-        "time":
-            current.get(
-                "time"
-            ),
-
-        "timezone":
-            data.get(
-                "timezone"
-            ),
-
-        "source":
-            "Open-Meteo",
-
-        "live":
-            True
-    }
 
 
 # ============================================================
